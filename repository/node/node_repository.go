@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package node_repository
 
 import (
@@ -29,18 +29,18 @@ import (
 
 // getNode is cypher query to retrieve a specific node.
 const getNode string = `
-	MATCH (vnd: Node {id: '%s'})
-	OPTIONAL MATCH (vnd)-[ecm:Compose]->(vrs)
-	OPTIONAL MATCH (vrs)-[ehv:Have]->(van)
-	OPTIONAL MATCH (vrs)-[endt: NotDetected]->(vndd: NotDetectedDevice)
-	OPTIONAL MATCH (vrsg)-[ein: Include]->(vrs)
-	WITH vnd, vrs, van, vrsg, endt 
+	MATCH (vnd:Node {id: '%s'})
+	OPTIONAL MATCH (vnd)-[:Compose]->(vrs)
+	OPTIONAL MATCH (vrs)-[:Have]->(van)
+	OPTIONAL MATCH (vrs)-[endt:NotDetected]->(:NotDetectedDevice)
+	OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
+	WITH vnd, vrs, van, vrsg, endt
 	RETURN
-		vnd, 
-		CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END, 
-		CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END, 
-		COLLECT(vrsg.id), 
-		CASE WHEN endt IS NULL THEN true ELSE false END 
+		vnd,
+		CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END,
+		CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END,
+		COLLECT(vrsg.id),
+		CASE WHEN endt IS NULL THEN true ELSE false END
 `
 const getNodeColumnCount = 5
 const (
@@ -69,13 +69,12 @@ func NewNodeRepository(nodeID string) NodeRepository {
 // The function processes the query results, assembling them into a structured map representing the node and its components.
 // If successful, it returns the assembled node as a map[string]any, or an error if the operation fails.
 func (nr *NodeRepository) Find(cmdb database.CmDb, filter filter.CmFilter) (map[string]any, error) {
-	query := fmt.Sprintf(getNode, nr.NodeID)
-
-	common.Log.Debug(query)
-	cypherCursor, err := cmdb.CmDbExecCypher(getNodeColumnCount, query)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", getNode, nr.NodeID))
+	cypherCursor, err := cmdb.CmDbExecCypher(getNodeColumnCount, getNode, nr.NodeID)
 	if err != nil {
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	records := [][]age.Entity{}
 	for cypherCursor.Next() {
@@ -86,7 +85,6 @@ func (nr *NodeRepository) Find(cmdb database.CmDb, filter filter.CmFilter) (map[
 		}
 		records = append(records, row)
 	}
-	cypherCursor.Close()
 
 	sort.Slice(records, func(i, j int) bool {
 		return compareByNodeSingle(records, i, j)

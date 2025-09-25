@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package resource_repository
 
 import (
@@ -24,7 +24,7 @@ import (
 
 const (
 	deleteIncludeEdge = `
-		MATCH (vrsg)-[ein: Include]->(vrs {deviceID: '%s'})
+		MATCH (vrsg)-[ein:Include]->({deviceID: '%s'})
 		DELETE ein
 `
 	deleteIncludeEdgeCount = 0
@@ -32,9 +32,9 @@ const (
 
 const (
 	createIncludeEdge = `
-		MATCH (vrs: %s {deviceID: '%s'})
-		MATCH (vrsg: ResourceGroups {id: '%s'})
-		CREATE (vrsg)-[ein: Include]->(vrs)
+		MATCH (vrs:%s {deviceID: '%s'})
+		MATCH (vrsg:ResourceGroups {id: '%s'})
+		CREATE (vrsg)-[:Include]->(vrs)
 `
 	createIncludeEdgeCount = 0
 )
@@ -77,17 +77,15 @@ func NewAssignResourceToGroupRepository(deviceID string, dbDeviceType string, ne
 // - A map containing the device ID and the new resource group IDs.
 // - An error if any database operation fails.
 func (argr *AssignResourceToGroupRepository) Set(cmdb database.CmDb, model model.CmModelMapper) (map[string]any, error) {
-	query := fmt.Sprintf(deleteIncludeEdge, argr.DeviceID)
-	common.Log.Debug(query)
-	_, err := cmdb.CmDbExecCypher(deleteIncludeEdgeCount, query)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", deleteIncludeEdge, argr.DeviceID))
+	_, err := cmdb.CmDbExecCypher(deleteIncludeEdgeCount, deleteIncludeEdge, argr.DeviceID)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, resourceGroupID := range argr.NewResourceGroups {
-		query := fmt.Sprintf(createIncludeEdge, argr.DbDeviceType, argr.DeviceID, resourceGroupID)
-		common.Log.Debug(query)
-		_, err = cmdb.CmDbExecCypher(createIncludeEdgeCount, query)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", createIncludeEdge, argr.DbDeviceType, argr.DeviceID, resourceGroupID))
+		_, err = cmdb.CmDbExecCypher(createIncludeEdgeCount, createIncludeEdge, argr.DbDeviceType, argr.DeviceID, resourceGroupID)
 		if err != nil {
 			return nil, err
 		}

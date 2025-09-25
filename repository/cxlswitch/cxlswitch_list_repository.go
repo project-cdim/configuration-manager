@@ -1,20 +1,21 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package cxlswitch_repository
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/project-cdim/configuration-manager/common"
@@ -30,17 +31,17 @@ import (
 // Cypher query to retrieve a list of CXL Switches
 // Retrieves the Vertex for the CXL Switch and any connected resources and related Vertices
 const getCXLSwitchList string = `
-	MATCH (vcx: CXLswitch)
-	OPTIONAL MATCH (vcx)-[ecn: Connect]->(vrs)
-	OPTIONAL MATCH (vrs)-[ehv: Have]->(van)
-	OPTIONAL MATCH (vrsg)-[ein: Include]->(vrs)
-	OPTIONAL MATCH (vnd)-[ecm: Compose]->(vrs)
-	OPTIONAL MATCH (vrs)-[endt: NotDetected]->(vndd: NotDetectedDevice)
+	MATCH (vcx:CXLswitch)
+	OPTIONAL MATCH (vcx)-[:Connect]->(vrs)
+	OPTIONAL MATCH (vrs)-[:Have]->(van)
+	OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
+	OPTIONAL MATCH (vnd)-[:Compose]->(vrs)
+	OPTIONAL MATCH (vrs)-[endt:NotDetected]->(:NotDetectedDevice)
 	WITH vcx, vrs, van, vrsg, vnd, endt
 	RETURN
 		vcx,
-		CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END, 
-		CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END, 
+		CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END,
+		CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END,
 		COLLECT(vrsg.id),
 		COLLECT(vnd.id),
 		CASE WHEN endt IS NULL THEN true ELSE false END
@@ -69,11 +70,12 @@ func NewCXLSwitchListRepository() CXLSwitchListRepository {
 // Each map in the slice represents a CXL switch and its associated resources.
 // The function returns a slice of maps representing the CXL switches and their resources, or an error if the operation fails.
 func (nlr *CXLSwitchListRepository) FindList(cmdb database.CmDb, filter filter.CmFilter) ([]map[string]any, error) {
-	common.Log.Debug(getCXLSwitchList)
+	common.Log.Debug(fmt.Sprintf("query: %s", getCXLSwitchList))
 	cypherCursor, err := cmdb.CmDbExecCypher(getCXLSwitchListColumnCount, getCXLSwitchList)
 	if err != nil {
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	records := [][]age.Entity{}
 	for cypherCursor.Next() {
@@ -84,7 +86,6 @@ func (nlr *CXLSwitchListRepository) FindList(cmdb database.CmDb, filter filter.C
 		}
 		records = append(records, row)
 	}
-	cypherCursor.Close()
 
 	sort.Slice(records, func(i, j int) bool {
 		return compareByCXLSwitchList(records, i, j)

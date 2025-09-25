@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package resource_repository
 
 import (
@@ -29,14 +29,14 @@ import (
 
 // Cypher query fragment to retrieve a specific resource
 const queryResource_match_return string = `
-MATCH (vrs: %s{deviceID: '%s'})
-OPTIONAL MATCH (vrs)-[ehv: Have]->(van)
-OPTIONAL MATCH (vrsg)-[ein: Include]->(vrs)
-OPTIONAL MATCH (vrs)-[endt: NotDetected]->(vndd: NotDetectedDevice)
-OPTIONAL MATCH (vnd)-[ecm: Compose]->(vrs)
-RETURN vrs, 
-	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END, 
-	COLLECT(vrsg.id), 
+MATCH (vrs:%s{deviceID: '%s'})
+OPTIONAL MATCH (vrs)-[:Have]->(van)
+OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
+OPTIONAL MATCH (vrs)-[endt:NotDetected]->(:NotDetectedDevice)
+OPTIONAL MATCH (vnd)-[:Compose]->(vrs)
+RETURN vrs,
+	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END,
+	COLLECT(vrsg.id),
 	COLLECT(vnd.id),
 	CASE WHEN endt IS NULL THEN true ELSE false END`
 
@@ -44,15 +44,29 @@ RETURN vrs,
 const queryResource_unionall string = `
 UNION ALL`
 
-// getQueryResource constructs a Cypher query to retrieve a specific resource by deviceID.
-// It iterates through a list of resource types, creating a part of the query for each,
-// and then joins these parts with a UNION ALL clause to form the final query.
-func getQueryResource(deviceID string) string {
+// getQueryResource generates a SQL query string by combining individual resource type queries.
+// It iterates through the resourceTypeList, creating a query for each resource type based on
+// queryResource_match_return, and then joins these queries together using queryResource_unionall.
+// The resulting string represents a union of queries for all resource types.
+func getQueryResource() string {
 	items := []string{}
-	for _, resourceType := range resourceTypeList {
-		items = append(items, fmt.Sprintf(queryResource_match_return, resourceType, deviceID))
+	for range ResourceTypeList {
+		items = append(items, queryResource_match_return)
 	}
 	return strings.Join(items, queryResource_unionall)
+}
+
+// getQueryResourceParam generates a slice of any containing the parameters
+// needed for querying resources. It iterates through the resourceTypeList,
+// appending each resource type and the deviceID to the slice. This slice is
+// then used as arguments in a database query.
+func getQueryResourceParam(deviceID string) []any {
+	items := []any{}
+	for _, resourceType := range ResourceTypeList {
+		items = append(items, resourceType)
+		items = append(items, deviceID)
+	}
+	return items
 }
 
 const getResourceColumnCount = 5
@@ -79,12 +93,14 @@ func NewResourceRepository(deviceID string) ResourceRepository {
 // Find returns a resource. It constructs a query using the deviceID, executes it, and processes the results.
 // If a matching resource is found, it is returned; otherwise, an error is returned.
 func (rr *ResourceRepository) Find(cmdb database.CmDb, filter filter.CmFilter) (map[string]any, error) {
-	query := getQueryResource(rr.DeviceID)
-	common.Log.Debug(query)
-	cypherCursor, err := cmdb.CmDbExecCypher(getResourceColumnCount, query)
+	query := getQueryResource()
+	queryParam := getQueryResourceParam(rr.DeviceID)
+	common.Log.Debug(fmt.Sprintf("query: %s", query))
+	cypherCursor, err := cmdb.CmDbExecCypher(getResourceColumnCount, query, queryParam...)
 	if err != nil {
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	resource := resource_model.NewResource()
 	for cypherCursor.Next() {
@@ -108,7 +124,6 @@ func (rr *ResourceRepository) Find(cmdb database.CmDb, filter filter.CmFilter) (
 		}
 		break
 	}
-	cypherCursor.Close()
 
 	return resource.ToObject(), nil
 }

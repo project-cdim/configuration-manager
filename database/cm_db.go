@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package database
 
 import (
@@ -35,8 +35,8 @@ const (
 	SECRETS_URL string = "http://localhost:3500/v1.0/secrets/" + common.ProjectName + "-configuration-manager/cmdb" // secret URL
 )
 
-// secretCmdb is cmdb's secret information.
-type secretCmdb struct {
+// SecretCmdb is cmdb's secret information.
+type SecretCmdb struct {
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	User     string `json:"user"`
@@ -74,7 +74,7 @@ func (g *CmDb) CmDbConnection() error {
 	var err error
 
 	// Retrieve secret information
-	secretCmdb, err := getSecretCmdb()
+	secretCmdb, err := GetSecretCmdb()
 	if err != nil {
 		return err
 	}
@@ -87,8 +87,10 @@ func (g *CmDb) CmDbConnection() error {
 	}
 
 	if _, err = age.GetReady(g.Db, GRAPH_NAME); err != nil {
-		g.Db.Close()
 		common.Log.Error(err.Error())
+		if err = g.Db.Close(); err != nil {
+			common.Log.Error(err.Error())
+		}
 		return err
 	}
 
@@ -117,6 +119,9 @@ func (g *CmDb) CmDbBeginTransaction() error {
 
 	if g.Tx, err = g.Db.Begin(); err != nil {
 		common.Log.Error(err.Error())
+		if err = g.Db.Close(); err != nil {
+			common.Log.Error(err.Error())
+		}
 		return err
 	}
 
@@ -190,9 +195,7 @@ func (g *CmDb) CmDbDisconnection() error {
 	defer g.clearConnection()
 
 	if g.Tx != nil {
-		if err = g.CmDbRollback(); err != nil {
-			return err
-		}
+		g.CmDbRollback()
 	}
 
 	if err = g.Db.Close(); err != nil {
@@ -211,13 +214,13 @@ func (g *CmDb) CmDbDisconnection() error {
 //
 // - Requires an active transaction to execute the Cypher query.
 // - Returns a CypherCursor on success or an error if the execution fails or if there is no active transaction.
-func (g *CmDb) CmDbExecCypher(columnCount int, cypher string) (*age.CypherCursor, error) {
+func (g *CmDb) CmDbExecCypher(columnCount int, cypher string, args ...any) (*age.CypherCursor, error) {
 	if g.Tx == nil {
 		common.Log.Error("Cypher was not executed due to invalid transaction.")
 		return nil, errors.New("transaction is invalid")
 	}
 
-	cypherCursor, err := age.ExecCypher(g.Tx, GRAPH_NAME, columnCount, cypher)
+	cypherCursor, err := age.ExecCypher(g.Tx, GRAPH_NAME, columnCount, cypher, args...)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return nil, err
@@ -251,7 +254,7 @@ func (g *CmDb) clearConnection() {
 	}
 }
 
-// getSecretCmdb retrieves all items under the secret name "cmdb" from the Dapr secret store "cmdb".
+// getSecretCmdbImpl retrieves all items under the secret name "cmdb" from the Dapr secret store "cmdb".
 // This function constructs the request URL for the Dapr secret store, sends an HTTP GET request to that URL, and processes the response.
 // If the request is successful, it reads the response body, unmarshals the JSON into a struct of type secretCmdb, and returns this struct.
 // In case of any errors (e.g., network issues, errors during the unmarshalling process), it returns an empty secretCmdb struct along with the error.
@@ -262,25 +265,27 @@ func (g *CmDb) clearConnection() {
 // 3. Reads the response body upon a successful request.
 // 4. Unmarshals the JSON response body into a secretCmdb struct.
 // 5. Returns the unmarshalled secretCmdb struct or an error if any step fails.
-func getSecretCmdb() (secretCmdb, error) {
+func getSecretCmdbImpl() (SecretCmdb, error) {
 	resp, err := http.Get(SECRETS_URL)
 	if err != nil {
 		common.Log.Error(err.Error())
-		return secretCmdb{}, err
+		return SecretCmdb{}, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		common.Log.Error(err.Error())
-		return secretCmdb{}, err
+		return SecretCmdb{}, err
 	}
-	var cmdb secretCmdb
+	var cmdb SecretCmdb
 	err = json.Unmarshal(body, &cmdb)
 	if err != nil {
 		common.Log.Error(err.Error())
-		return secretCmdb{}, err
+		return SecretCmdb{}, err
 	}
 
 	return cmdb, nil
 }
+
+var GetSecretCmdb = getSecretCmdbImpl

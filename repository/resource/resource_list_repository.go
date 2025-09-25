@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package resource_repository
 
 import (
@@ -28,8 +28,10 @@ import (
 	"github.com/apache/age/drivers/golang/age"
 )
 
-// resourceTypeList is a list of resource types.
-var resourceTypeList = [...]string{
+// ResourceTypeList is a list of resource types.
+// Note: The type has been changed from [...]string to []any to allow expanding
+// this list as variadic arguments when needed.
+var ResourceTypeList = []any{
 	"CPU",
 	"Accelerator",
 	"DSP",
@@ -45,14 +47,14 @@ var resourceTypeList = [...]string{
 
 // Cypher query fragment to retrieve a specific resource
 const queryResourceList_match_return string = `
-MATCH (vrs: %s)
-OPTIONAL MATCH (vrs)-[ehv: Have]->(van)
-OPTIONAL MATCH (vrsg)-[ein: Include]->(vrs)
-OPTIONAL MATCH (vrs)-[endt: NotDetected]->(vndd: NotDetectedDevice)
-OPTIONAL MATCH (vnd)-[ecm: Compose]->(vrs)
-RETURN vrs, 
-	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END, 
-	COLLECT(vrsg.id), 
+MATCH (vrs:%s)
+OPTIONAL MATCH (vrs)-[:Have]->(van)
+OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
+OPTIONAL MATCH (vrs)-[endt:NotDetected]->(: NotDetectedDevice)
+OPTIONAL MATCH (vnd)-[:Compose]->(vrs)
+RETURN vrs,
+	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END,
+	COLLECT(vrsg.id),
 	COLLECT(vnd.id),
 	CASE WHEN endt IS NULL THEN true ELSE false END`
 
@@ -60,13 +62,13 @@ RETURN vrs,
 const queryResourceList_unionall string = `
 UNION ALL`
 
-// getQueryResourceList constructs a Cypher query to retrieve a list of resources.
-// It iterates through a list of resource types, creating a part of the query for each,
-// and then joins these parts with a UNION ALL clause to form the final query.
+// getQueryResourceList generates a SQL query string by combining multiple resource type queries.
+// It iterates over the resourceTypeList, appending a predefined query pattern for each resource type.
+// The resulting queries are then joined together using a UNION ALL clause to form a single query.
 func getQueryResourceList() string {
 	items := []string{}
-	for _, resourceType := range resourceTypeList {
-		items = append(items, fmt.Sprintf(queryResourceList_match_return, resourceType))
+	for range ResourceTypeList {
+		items = append(items, queryResourceList_match_return)
 	}
 	return strings.Join(items, queryResourceList_unionall)
 }
@@ -99,11 +101,12 @@ func NewResourceListRepository(detail bool) ResourceListRepository {
 // The function returns a slice of map[string]any representing the resources, or an error if the operation fails.
 func (rlr *ResourceListRepository) FindList(cmdb database.CmDb, filter filter.CmFilter) ([]map[string]any, error) {
 	query := getQueryResourceList()
-	common.Log.Debug(query)
-	cypherCursor, err := cmdb.CmDbExecCypher(getResourceListColumnCount, query)
+	common.Log.Debug(fmt.Sprintf("query: %s, params: %v", query, ResourceTypeList))
+	cypherCursor, err := cmdb.CmDbExecCypher(getResourceListColumnCount, query, ResourceTypeList...)
 	if err != nil {
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	resourceList := resource_model.NewResourceList()
 	for cypherCursor.Next() {
@@ -127,7 +130,6 @@ func (rlr *ResourceListRepository) FindList(cmdb database.CmDb, filter filter.Cm
 			resourceList.Resources = append(resourceList.Resources, resource)
 		}
 	}
-	cypherCursor.Close()
 
 	switch filter.(type) {
 	case resource_filter.ResourceAvailableFilter:

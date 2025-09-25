@@ -1,60 +1,74 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package annotation_repository
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/project-cdim/configuration-manager/common"
 	"github.com/project-cdim/configuration-manager/database"
 	"github.com/project-cdim/configuration-manager/model"
+	resource_repository "github.com/project-cdim/configuration-manager/repository/resource"
 )
 
 const updateAnnotation string = `
-	MATCH (vrs {deviceID: '%s'})-[ehv: Have]->(van:Annotation)
+	MATCH (vrs {deviceID: '%s'})-[:Have]->(van:Annotation)
+	WHERE %s
 	SET van = %s
 `
 
-// UpdateAnnotationRepository is a repository that handles the updating of annotations.
-// It contains the deviceID which is used to identify the specific device for which the annotations are being updated.
-type UpdateAnnotationRepository struct {
-	deviceID string
+const updateAnnotationWhereParts string = "'%s' IN labels(vrs)"
+
+// updateAnnotationConstructsWhereClause constructs a WHERE clause for Cypher queries to filter vertices
+// based on resource types. It generates an OR condition that checks if any of the resource types
+// from ResourceTypeList exist as labels on the 'vrs' vertices variable.
+// Returns a string containing the complete WHERE clause condition.
+func updateAnnotationConstructsWhereClause() string {
+	var whereClauses []string
+	for _, resourceType := range resource_repository.ResourceTypeList {
+		whereClauses = append(whereClauses, fmt.Sprintf(updateAnnotationWhereParts, resourceType))
+	}
+	return strings.Join(whereClauses, " OR ")
 }
 
-// NewUpdateAnnotationRepository creates a new instance of UpdateAnnotationRepository with the provided device ID.
-//
-// Parameters:
-//   - deviceID: A string representing the unique identifier of the device.
-//
-// Returns:
-//   - UpdateAnnotationRepository: A new instance of UpdateAnnotationRepository initialized with the given device ID.
-func NewUpdateAnnotationRepository(deviceID string) UpdateAnnotationRepository {
+// UpdateAnnotationRepository is a struct that holds the device IDs to be updated.
+// It is used to update the annotations for the specified devices.
+type UpdateAnnotationRepository struct {
+	deviceIDs []string
+}
+
+// NewUpdateAnnotationRepository creates a new UpdateAnnotationRepository with the given device IDs.
+// It returns an UpdateAnnotationRepository instance.
+func NewUpdateAnnotationRepository(deviceIDs []string) UpdateAnnotationRepository {
 	return UpdateAnnotationRepository{
-		deviceID: deviceID,
+		deviceIDs: deviceIDs,
 	}
 }
 
-// Set updates the resource annotation for the repository.
-// This method is responsible for updating the annotation information associated with a specific device in the repository.
-// It takes a CmDb interface for database operations and a CmModelMapper for mapping the model to the database schema.
+// Set updates annotations in the database based on the provided model and device IDs.
+// It converts the model to a Cypher property map and then iterates through the device IDs,
+// executing an update query for each device ID.
 //
-// The method extracts the deviceID from the model, constructs an update query, and executes it against the database.
-// If the operation is successful, it returns nil; otherwise, it returns an error.
+// Parameters:
+//   - cmdb: A database connection implementing the database.CmDb interface.
+//   - model: A model implementing the model.CmModelMapper interface, representing the annotation data.
 //
-// Note: This method currently includes a workaround for including the deviceID in the annotation object.
-// This will be unnecessary once the deviceID is removed from the annotation object in the database schema.
+// Returns:
+//   - A map[string]any representing the updated annotation object, or nil if an error occurs.
+//   - An error if any operation fails during the update process.
 func (uar *UpdateAnnotationRepository) Set(cmdb database.CmDb, model model.CmModelMapper) (map[string]any, error) {
 	annotationObject := model.ToObject()
 
@@ -62,11 +76,16 @@ func (uar *UpdateAnnotationRepository) Set(cmdb database.CmDb, model model.CmMod
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf(updateAnnotation, uar.deviceID, cypherProperty)
 
-	_, err = cmdb.CmDbExecCypher(0, query)
-	if err != nil {
-		return nil, err
+	whereClauses := updateAnnotationConstructsWhereClause()
+	if uar.deviceIDs != nil {
+		for _, deviceIDs := range uar.deviceIDs {
+			common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", updateAnnotation, deviceIDs, whereClauses, cypherProperty))
+			_, err = cmdb.CmDbExecCypher(0, updateAnnotation, deviceIDs, whereClauses, cypherProperty)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return annotationObject, nil

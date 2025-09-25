@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package group_repository
 
 import (
@@ -28,7 +28,7 @@ import (
 
 const (
 	getResourceGroupCount = `
-		MATCH (vrsg: ResourceGroups {id: '%s'})
+		MATCH (vrsg:ResourceGroups {id: '%s'})
 		return COUNT(vrsg)
 `
 	getResourceGroupCountColumnCount = 1
@@ -36,7 +36,7 @@ const (
 
 const (
 	mergeResourceGroup = `
-		MERGE (vrsg: ResourceGroups {id: '%s'})
+		MERGE (vrsg:ResourceGroups {id: '%s'})
 		SET vrsg = %s
 `
 	mergeResourceGroupColumnCount = 0
@@ -79,9 +79,8 @@ func (cgr *CreateGroupRepository) Set(cmdb database.CmDb, model model.CmModelMap
 		return nil, err
 	}
 
-	query := fmt.Sprintf(mergeResourceGroup, id, property)
-	common.Log.Debug(query)
-	_, err = cmdb.CmDbExecCypher(mergeResourceGroupColumnCount, query)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", mergeResourceGroup, id, property))
+	_, err = cmdb.CmDbExecCypher(mergeResourceGroupColumnCount, mergeResourceGroup, id, property)
 	if err != nil {
 		return nil, err
 	}
@@ -103,13 +102,13 @@ func generateResourceGroupID(cmdb database.CmDb) (string, error) {
 	for i := 0; i < 10; i++ {
 		id, _ := uuid.NewV7()
 
-		query := fmt.Sprintf(getResourceGroupCount, id.String())
-		common.Log.Debug(query)
-		cypherCursor, err := cmdb.CmDbExecCypher(getResourceGroupCountColumnCount, query)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", getResourceGroupCount, id.String()))
+		cypherCursor, err := cmdb.CmDbExecCypher(getResourceGroupCountColumnCount, getResourceGroupCount, id.String())
 		if err != nil {
 			common.Log.Error(err.Error())
 			return "", err
 		}
+		defer cypherCursor.Close()
 
 		for cypherCursor.Next() {
 			row, err := cypherCursor.GetRow()
@@ -121,12 +120,10 @@ func generateResourceGroupID(cmdb database.CmDb) (string, error) {
 			cntEntity := row[0].(*age.SimpleEntity)
 			cnt := int(cntEntity.AsInt64())
 			if cnt == 0 {
-				cypherCursor.Close()
 				return id.String(), nil
 			}
 			break
 		}
-		cypherCursor.Close()
 	}
 
 	return "", errors.New("generateResourceGroupID : An ID was generated in UUID format, but duplicates continued to occur")

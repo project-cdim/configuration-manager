@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package common
 
 import (
@@ -179,7 +179,7 @@ func convertByType(anyValue any) (string, error) {
 	switch reflect.ValueOf(anyValue).Kind() {
 	case reflect.String:
 		// Use the value of v by enclosing it in double quotation marks as the output value.
-		result = "\"" + anyValue.(string) + "\""
+		result = fmt.Sprintf("%q", anyValue.(string))
 
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64:
 		// Use the value of v without enclosing it in double quotation marks as the output value.
@@ -289,5 +289,76 @@ func nil2Empty(anyValue any) any {
 		return Nil2EmptyFromMap(anyValue.(map[string]any))
 	default:
 		return anyValue
+	}
+}
+
+// UnquoteRecursive performs recursive unquoting on the input value.
+//
+// This function must be called during the response phase.
+// In both request and response phase, control characters such as tabs undergo escape sequence processing (e.g., \t).
+// If this function is not called, escape sequences will be duplicated (e.g., \\t).
+//
+// This function processes the following types:
+//   - string: Unquotes using strconv.Unquote
+//   - slice/array: Recursively applies UnquoteRecursive to each element
+//   - map: Recursively applies UnquoteRecursive to each value (keys are treated as strings)
+//   - other types: Returns as-is
+//
+// Parameters:
+//   - input: The value to be unquoted
+//
+// Returns:
+//   - any: The unquoted value. Returns nil if nil is passed or if unquoting fails
+//   - error: An error if unquoting fails for a string value, otherwise nil
+func UnquoteRecursive(input any) (any, error) {
+	if input == nil {
+		return nil, nil
+	}
+
+	val := reflect.ValueOf(input)
+	kind := val.Kind()
+
+	switch kind {
+	case reflect.String:
+		s := `"` + val.String() + `"`
+		unquoted, err := strconv.Unquote(s)
+		if err != nil {
+			// This error should not occur because the string to be unquoted is always quoted beforehand.
+			Log.Error(err.Error())
+			return nil, err
+		}
+		return unquoted, nil
+	case reflect.Slice, reflect.Array:
+		newSlice := make([]any, val.Len())
+
+		for i := 0; i < val.Len(); i++ {
+			elem := val.Index(i)
+
+			// Convert element to any type and recursively call itself
+			unquotedElem, err := UnquoteRecursive(elem.Interface())
+			if err != nil {
+				return nil, err
+			}
+			newSlice[i] = unquotedElem
+		}
+		return newSlice, nil
+	case reflect.Map:
+		newMap := make(map[string]any, val.Len())
+
+		iter := val.MapRange()
+		for iter.Next() {
+			k := iter.Key()
+			v := iter.Value()
+
+			// Convert value to any type and recursively call itself
+			unquotedValue, err := UnquoteRecursive(v.Interface())
+			if err != nil {
+				return nil, err
+			}
+			newMap[k.String()] = unquotedValue
+		}
+		return newMap, nil
+	default:
+		return input, nil
 	}
 }

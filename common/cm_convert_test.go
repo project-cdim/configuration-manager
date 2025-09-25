@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package common
 
 import (
@@ -200,7 +200,11 @@ func Test_convertByType(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"string", args{"test string"}, "\"test string\"", false},
+		{"string_simple", args{`test string`}, `"test string"`, false},
+		{"string_with_escape", args{`test\nstring`}, `"test\\nstring"`, false},
+		{"string_with_quotes", args{`test '"string"`}, `"test '\"string\""`, false},
+		{"string_with_backslash", args{`test\\string`}, `"test\\\\string"`, false},
+		{"string_with_angle_bracket_ampersand", args{`test string<&>`}, `"test string<&>"`, false},
 		{"int", args{int(1)}, "1", false},
 		{"int8", args{int8(2)}, "2", false},
 		{"int16", args{int16(3)}, "3", false},
@@ -267,70 +271,70 @@ func Test_Nil2EmptyFromMap(t *testing.T) {
 		want map[string]any
 	}{
 		{
-			"値nil配列の場合空配列を返す map{ccc: []}",
+			"nil slice value returns empty slice map{ccc: []}",
 			args{
 				map[string]any{"key1": valNilSlice},
 			},
 			map[string]any{"key1": []any{}},
 		},
 		{
-			"値無配列 map{ccc: [{}]}",
+			"empty slice value map{ccc: [{}]}",
 			args{
 				map[string]any{"key1": []any{}},
 			},
 			map[string]any{"key1": []any{}},
 		},
 		{
-			"値string map{aa:aaa1}",
+			"string value map{aa:aaa1}",
 			args{
 				map[string]any{"key1": "value1"},
 			},
 			map[string]any{"key1": "value1"},
 		},
 		{
-			"値string, 二つ map{aa:aaa1 bb:bbb1}",
+			"two string values map{aa:aaa1 bb:bbb1}",
 			args{
 				createTestValue_Map(),
 			},
 			createTestValue_Map(),
 		},
 		{
-			"値string配列 map{ccc: [aaa1, bbb1]}",
+			"string slice value map{ccc: [aaa1, bbb1]}",
 			args{
 				map[string]any{"key1": createTestValue_Slice()},
 			},
 			map[string]any{"key1": createTestValue_Slice()},
 		},
 		{
-			"値map配列 map{ccc: [map{aa:aaa2 bb:bbb2}, map{aa:aaa3 bb:bbb3}]}",
+			"map slice value map{ccc: [map{aa:aaa2 bb:bbb2}, map{aa:aaa3 bb:bbb3}]}",
 			args{
 				map[string]any{"key1": []any{createTestValue_Map(), createTestValue_Map()}},
 			},
 			map[string]any{"key1": []any{createTestValue_Map(), createTestValue_Map()}},
 		},
 		{
-			"値map map{ccc: map{aa:aaa2 bb:bbb2}}",
+			"map value map{ccc: map{aa:aaa2 bb:bbb2}}",
 			args{
 				map[string]any{"key1": createTestValue_Map()},
 			},
 			map[string]any{"key1": createTestValue_Map()},
 		},
 		{
-			"値mapでmapの値が配列 map{ccc: map{aa:[aaa1, bbb1] bb:[aaa2, bbb2]}}",
+			"map value with slice values map{ccc: map{aa:[aaa1, bbb1] bb:[aaa2, bbb2]}}",
 			args{
 				map[string]any{"key1": map[string]any{"aaa": createTestValue_Slice(), "bbb": createTestValue_Slice()}},
 			},
 			map[string]any{"key1": map[string]any{"aaa": createTestValue_Slice(), "bbb": createTestValue_Slice()}},
 		},
 		{
-			"値mapでmapの値が値nil配列 map{ccc: map{aa:[] bb:[aaa2, bbb2]}}",
+			"map value with nil slice value map{ccc: map{aa:[] bb:[aaa2, bbb2]}}",
 			args{
 				map[string]any{"key1": map[string]any{"aaa": valNilSlice, "bbb": createTestValue_Slice()}},
 			},
 			map[string]any{"key1": map[string]any{"aaa": []any{}, "bbb": createTestValue_Slice()}},
 		},
 		{
-			"値mapでmapの値が値無配列 map{ccc: map{aa:[{}] bb:[aaa2, bbb2]}}",
+			"map value with empty slice value map{ccc: map{aa:[{}] bb:[aaa2, bbb2]}}",
 			args{
 				map[string]any{"key1": map[string]any{"aaa": []any{}, "bbb": createTestValue_Slice()}},
 			},
@@ -436,14 +440,14 @@ func Test_nil2Empty(t *testing.T) {
 		{"slice,lenZero", args{[]any{}}, []any{}},
 		{"slice,array", args{[]any{createTestValue_Array(), createTestValue_Array()}}, []any{createTestValue_Array(), createTestValue_Array()}},
 		{"slice,slice", args{[]any{createTestValue_Slice(), createTestValue_Slice()}}, []any{createTestValue_Slice(), createTestValue_Slice()}},
-		{"slice,nilslice", args{[]any{createTestValue_Slice(), valNilSlice}}, []any{createTestValue_Slice(), []any{}}}, // nil
-		{"slice,karaslice", args{[]any{createTestValue_Slice(), []any{}}}, []any{createTestValue_Slice(), []any{}}},    // kara
+		{"slice,nilslice", args{[]any{createTestValue_Slice(), valNilSlice}}, []any{createTestValue_Slice(), []any{}}},
+		{"slice,karaslice", args{[]any{createTestValue_Slice(), []any{}}}, []any{createTestValue_Slice(), []any{}}},
 		{"slice,map", args{[]any{createTestValue_Map()}}, []any{createTestValue_Map()}},
 		{"map", args{createTestValue_Map()}, createTestValue_Map()},
 		{"map,array", args{map[string]any{"key1": createTestValue_Array(), "key2": createTestValue_Array()}}, map[string]any{"key1": createTestValue_Array(), "key2": createTestValue_Array()}},
 		{"map,slice", args{map[string]any{"key1": createTestValue_Slice(), "key2": createTestValue_Slice()}}, map[string]any{"key1": createTestValue_Slice(), "key2": createTestValue_Slice()}},
-		{"map,nilslice", args{map[string]any{"key1": valNilSlice, "key2": createTestValue_Slice()}}, map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}}, // nil
-		{"map,karaslice", args{map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}}, map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}},    // kara
+		{"map,nilslice", args{map[string]any{"key1": valNilSlice, "key2": createTestValue_Slice()}}, map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}},
+		{"map,karaslice", args{map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}}, map[string]any{"key1": []any{}, "key2": createTestValue_Slice()}},
 		{"map,map", args{map[string]any{"key1": createTestValue_Map(), "key2": createTestValue_Map()}}, map[string]any{"key1": createTestValue_Map(), "key2": createTestValue_Map()}},
 		{"unexpected_otherType", args{map[string]any{"key1": createTestValue_Slice(), "key2": &testST1{}}}, map[string]any{"key1": createTestValue_Slice(), "key2": &testST1{}}},
 	}
@@ -451,6 +455,55 @@ func Test_nil2Empty(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := nil2Empty(tt.args.anyValue); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("nil2Empty() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnquoteRecursive(t *testing.T) {
+	type args struct {
+		input any
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    any
+		wantErr bool
+	}{
+		{"nil", args{nil}, nil, false},
+		{"string_simple", args{`hello`}, "hello", false},
+		{"string_with_escape", args{`hello\nworld`}, "hello\nworld", false},
+		{"string_with_quotes", args{`say '\"hello\"`}, `say '"hello"`, false},
+		{"string_with_backslash", args{`path\\to\\file`}, `path\to\file`, false},
+		{"string_with_angle_bracket_ampersand", args{`<&>`}, `<&>`, false},
+		{"string_empty", args{``}, "", false},
+		{"string_invalid_escape", args{`\x`}, nil, true},
+		{"int", args{42}, 42, false},
+		{"slice_strings", args{[]any{`hello`, `world`}}, []any{"hello", "world"}, false},
+		{"slice_mixed", args{[]any{`hello`, 42, true}}, []any{"hello", 42, true}, false},
+		{"slice_empty", args{[]any{}}, []any{}, false},
+		{"slice_with_escape", args{[]any{`hello\nworld`, `test\"quote`}}, []any{"hello\nworld", `test"quote`}, false},
+		{"slice_nested", args{[]any{[]any{`inner1`, `inner2`}, `outer`}}, []any{[]any{"inner1", "inner2"}, "outer"}, false},
+		{"slice_with_error", args{[]any{`valid`, `\x`}}, nil, true},
+		{"map_strings", args{map[string]any{"key1": `value1`, "key2": `value2`}}, map[string]any{"key1": "value1", "key2": "value2"}, false},
+		{"map_mixed", args{map[string]any{"str": `hello`, "num": 42, "bool": true}}, map[string]any{"str": "hello", "num": 42, "bool": true}, false},
+		{"map_empty", args{map[string]any{}}, map[string]any{}, false},
+		{"map_with_escape", args{map[string]any{"key1": `hello\nworld`, "key2": `test\"quote`}}, map[string]any{"key1": "hello\nworld", "key2": `test"quote`}, false},
+		{"map_nested", args{map[string]any{"outer": map[string]any{"inner": `nested`}, "simple": `value`}}, map[string]any{"outer": map[string]any{"inner": "nested"}, "simple": "value"}, false},
+		{"map_with_slice", args{map[string]any{"list": []any{`item1`, `item2`}, "single": `value`}}, map[string]any{"list": []any{"item1", "item2"}, "single": "value"}, false},
+		{"map_with_error", args{map[string]any{"valid": `hello`, "invalid": `\x`}}, nil, true},
+		{"array_strings", args{[2]any{`hello`, `world`}}, []any{"hello", "world"}, false},
+		{"array_mixed", args{[3]any{`hello`, 42, true}}, []any{"hello", 42, true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := UnquoteRecursive(tt.args.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UnquoteRecursive() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("UnquoteRecursive() = %v, want %v", got, tt.want)
 			}
 		})
 	}

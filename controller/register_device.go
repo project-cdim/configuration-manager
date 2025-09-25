@@ -1,20 +1,21 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package controller
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -27,6 +28,8 @@ import (
 
 	"github.com/apache/age/drivers/golang/age"
 	"github.com/gin-gonic/gin"
+
+	dapr "github.com/dapr/go-sdk/client"
 )
 
 // Structure for registration information
@@ -47,8 +50,58 @@ type existingNodeSwitch struct {
 	deviceDictionary map[string]hwResourceType
 }
 
+// unitResources represents the relationship between a unit device and its associated resources.
+type unitResources struct {
+	unitDeviceID      string
+	resourceDeviceIDs []string
+}
+
+// newUnitResources creates a unitResources instance based on the provided
+// request resource and non-removable device IDs. It extracts the device ID from the
+// request resource and determines the related device IDs based on the resource type.
+//
+// For processor-type resources (Accelerator, CPU, DSP, FPGA, GPU, UnknownProcessor),
+// it includes both the unit device ID and all non-removable device IDs in the
+// relatedDeviceIDs slice. If no non-removable device IDs are provided, only the
+// unit device ID is included regardless of resource type.
+//
+// Parameters:
+//   - requestResource: A map containing resource information including "deviceID" and "type"
+//   - nonRemovableDeviceIDs: A slice of device IDs that cannot be removed
+//
+// Returns:
+//   - unitResources: A configured relation object with unit device ID and related device IDs
+func newUnitResources(requestResource map[string]any, nonRemovableDeviceIDs []string) unitResources {
+	res := unitResources{}
+	res.unitDeviceID = requestResource["deviceID"].(string)
+	res.resourceDeviceIDs = []string{}
+
+	if len(nonRemovableDeviceIDs) == 0 {
+		res.resourceDeviceIDs = append(res.resourceDeviceIDs, res.unitDeviceID)
+	} else {
+		resourceType := hwResourceType(requestResource["type"].(string))
+		switch resourceType {
+		case Accelerator, CPU, DSP, FPGA, GPU, UnknownProcessor:
+			res.resourceDeviceIDs = append(res.resourceDeviceIDs, res.unitDeviceID)
+			res.resourceDeviceIDs = append(res.resourceDeviceIDs, nonRemovableDeviceIDs...)
+		}
+	}
+
+	return res
+}
+
+// isRegisterable checks whether the unit resource relation can be registered.
+// It returns true if there are related device IDs associated with this unit resource relation,
+// false otherwise. A unit resource relation is considered registerable only when it has
+// at least one related device ID.
+func (urr *unitResources) isRegisterable() bool {
+	return len(urr.resourceDeviceIDs) != 0
+}
+
 // resourceTypeList is a list of resource types.
-var resourceTypeList = [...]string{
+// Note: The type has been changed from [...]string to []any to allow expanding
+// this list as variadic arguments when needed.
+var resourceTypeList = []any{
 	DB_CPU,
 	DB_Accelerator,
 	DB_DSP,
@@ -64,9 +117,9 @@ var resourceTypeList = [...]string{
 
 // Parts of the Cypher query to fetch specific resources
 const queryResourceList_match_return string = `
-MATCH (vrs: %s)
+MATCH (vrs:%s)
 WHERE exists(vrs.deviceID) AND exists(vrs.type)
-OPTIONAL MATCH (vrsg)-[ein:Include]->(vrs)
+OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
 RETURN vrs.deviceID, vrs.type, COLLECT(vrsg.id)`
 
 const queryResourceList_unionall string = `
@@ -77,8 +130,8 @@ UNION ALL`
 // These parts are then joined together using a UNION ALL clause to combine the results from different resource types into a single list.
 func getQueryResourceList() string {
 	items := []string{}
-	for _, resourceType := range resourceTypeList {
-		items = append(items, fmt.Sprintf(queryResourceList_match_return, resourceType))
+	for range resourceTypeList {
+		items = append(items, queryResourceList_match_return)
 	}
 	return strings.Join(items, queryResourceList_unionall)
 }
@@ -92,7 +145,7 @@ const (
 
 // cypher query to search node
 const cypherSelectNodeList string = `
-	MATCH (vnd: Node)-[ecm:Compose]->(vrs)
+	MATCH (vnd:Node)-[:Compose]->(vrs)
 	WITH vnd, vrs
 	ORDER BY vnd.id
 	RETURN vnd.id, vrs.deviceID, vrs.type
@@ -106,8 +159,8 @@ const (
 
 // cypher query to search switch
 const cyperSelectSwitchList string = `
-	MATCH (vcx: CXLswitch)
-	OPTIONAL MATCH (vcx)-[ecn:Connect]->(vrs)
+	MATCH (vcx:CXLswitch)
+	OPTIONAL MATCH (vcx)-[:Connect]->(vrs)
 	WITH vcx, vrs
 	ORDER BY vcx.id
 	RETURN vcx.id, CASE WHEN vrs.deviceID IS NULL THEN "" ELSE vrs.deviceID END, CASE WHEN vrs.type IS NULL THEN "" ELSE vrs.type END
@@ -121,7 +174,7 @@ const (
 
 // cypher query to merge resource
 const cyperMergeResource = `
-	MERGE (vrs: %s {deviceID: '%s'})
+	MERGE (vrs:%s {deviceID: '%s'})
 	SET vrs = %s
 `
 
@@ -132,84 +185,135 @@ const (
 
 // cypher query to create annotation vertex and have edge
 const cypherCreateAnnotation = `
-	MATCH (vrs: %s {deviceID: '%s'})
+	MATCH (vrs:%s {deviceID: '%s'})
 	CREATE (van:Annotation {available: true})
-	CREATE (vrs)-[ehv: Have]->(van)
+	CREATE (vrs)-[:Have]->(van)
 `
 
 // cypher query to delete notDetected edge from resource vertex
 const cypherDeleteResourceNotdetectedEdge = `
-	MATCH (vrs: %s {deviceID: '%s'})-[endt: NotDetected]->(vndd: NotDetectedDevice) 
+	MATCH (:%s {deviceID: '%s'})-[endt:NotDetected]->(:NotDetectedDevice)
 	DELETE endt
 `
 
 // cypher query to create notDetected edge from resource vertex
 const cypherCreateResourceNotdetectedEdge = `
-	MATCH (vrs: %s {deviceID: '%s'}), (vndd: NotDetectedDevice)
-	CREATE (vrs)-[endt: NotDetected]->(vndd)
+	MATCH (vrs:%s {deviceID: '%s'}), (vndd:NotDetectedDevice)
+	CREATE (vrs)-[:NotDetected]->(vndd)
 `
 
 // cypher query to delete notDetected edge from node vertex
 const cypherDeleteNodeNotdetectedEdge = `
-	MATCH (vnd: Node {id: '%s'})-[endt: NotDetected]->(vndd: NotDetectedDevice) 
+	MATCH (:Node {id: '%s'})-[endt:NotDetected]->(:NotDetectedDevice)
 	DELETE endt
 `
 
 // cypher query to delete notDetected edge from switch vertex
 const cypherDeleteSwitchNotdetectedEdge = `
-	MATCH (vcx: CXLswitch {id: '%s'})-[endt: NotDetected]->(vndd: NotDetectedDevice) 
+	MATCH (:CXLswitch {id: '%s'})-[endt:NotDetected]->(:NotDetectedDevice)
 	DELETE endt
 `
 
 // cypher query to merge node
 const cypherMergeNode = `
-	MERGE (vnd: Node {id: '%s'})
+	MERGE (vnd:Node {id: '%s'})
 	SET vnd = {id: '%s'}
 `
 
 // cypher query to merge switch
 const cypherMergeSwitch = `
-	MERGE (vcx: CXLswitch {id: '%s'})
+	MERGE (vcx:CXLswitch {id: '%s'})
 	SET vcx = {id: '%s'}
 `
 
 // cypher query to delete compose edge
 const cypherDeleteComposeEdge = `
-	MATCH (vnd: Node {id: '%s'})-[ecm: Compose]->(vrs)
+	MATCH (:Node {id: '%s'})-[ecm:Compose]->()
 	DELETE ecm
 `
 
 // cypher query to delete connect edge
 const cypherDeleteConnectEdge = `
-	MATCH (vcx: CXLswitch {id: '%s'})-[ecn: Connect]->(vrs)
+	MATCH (:CXLswitch {id: '%s'})-[ecn:Connect]->()
 	DELETE ecn
 `
 
 // cypher query to create compose edge
 const cypherCreateComposeEdge = `
-	MATCH (vrs: %s {deviceID: '%s'}), (vnd: Node {id: '%s'})
-	CREATE (vnd)-[ecm: Compose]->(vrs)
+	MATCH (vrs:%s {deviceID: '%s'}), (vnd:Node {id: '%s'})
+	CREATE (vnd)-[:Compose]->(vrs)
 `
 
 // cypher query to create connect edge
 const cypherCreateConnectEdge = `
-	MATCH (vrs: %s {deviceID: '%s'}), (vcx: CXLswitch {id: '%s'})
-	CREATE (vcx)-[ecn: Connect]->(vrs)
+	MATCH (vrs:%s {deviceID: '%s'}), (vcx:CXLswitch {id: '%s'})
+	CREATE (vcx)-[:Connect]->(vrs)
 `
 
 // cypher query to delete node if it does'nt have at least one compose edge
 const cypherDeleteNodeWithoutEdges = `
-	MATCH (vnd: Node)
-	OPTIONAL MATCH (vnd: Node)-[ecm: Compose]->(vrs) WITH vnd, count(ecm) AS edges
+	MATCH (vnd:Node)
+	OPTIONAL MATCH (vnd:Node)-[ecm:Compose]->() WITH vnd, count(ecm) AS edges
 	WHERE edges = 0
 	DETACH DELETE vnd
 `
 
 // cypher query to create include edge
 const cypherCreateIncludeEdge = `
-	MATCH (vrs: %s {deviceID: '%s'}), (vrsg: ResourceGroups {id: '%s'})
-	CREATE (vrsg)-[ein: Include]->(vrs)
+	MATCH (vrs:%s {deviceID: '%s'}), (vrsg:ResourceGroups {id: '%s'})
+	CREATE (vrsg)-[:Include]->(vrs)
 `
+
+// cypher query to merge Unit vertex, Annotation vertex, Have edge, and delete Contain edge.
+const cypherMergeUnitAndDeleteContain = `
+	MERGE (vut:Unit {deviceID: '%s'})
+	MERGE (vut)-[:Have]->(:Annotation {available: true})
+	WITH vut
+	MATCH (vut)-[ect:Contain]->()
+	DELETE ect
+`
+
+// cypher query to create Unit vertex, Annotation vertex, Have edge, and Contain edge.
+const cypherCreateContain = `
+	MATCH (vut:Unit {deviceID: '%s'})
+	MATCH %s
+	CREATE %s
+`
+
+const (
+	// Parts of the Cypher query to create Contain edge
+	cypherCreateContainMatchParts = `(vrs%d:%s {deviceID: '%s'})`
+
+	// Parts of the Cypher query to create Contain edge
+	cypherCreateContainCreateParts = `(vut)-[:Contain]->(vrs%d)`
+)
+
+// DaprClient is an interface that defines the methods for publishing events to Dapr.
+// This interface is used to enable dependency injection for testing purposes.
+type DaprClient interface {
+	PublishEvent(ctx context.Context, pubsubName, topicName string, data interface{}, opts ...dapr.PublishEventOption) error
+}
+
+// DaprClientImpl is a wrapper around the official Dapr client.
+// This is the production implementation.
+type DaprClientImpl struct {
+	client dapr.Client
+}
+
+// PublishEvent publishes an event to the specified pubsub and topic using the Dapr client.
+func (d *DaprClientImpl) PublishEvent(ctx context.Context, pubsubName, topicName string, data interface{}, opts ...dapr.PublishEventOption) error {
+	return d.client.PublishEvent(ctx, pubsubName, topicName, data, opts...)
+}
+
+// DaprClientFactory is a function type that creates a new DaprClient.
+// This can be replaced with a mock implementation during testing.
+var DaprClientFactory = func() (DaprClient, error) {
+	client, err := dapr.NewClient()
+	if err != nil {
+		return nil, err
+	}
+	return &DaprClientImpl{client: client}, nil
+}
 
 // RegisterDevice registers multiple device information in the configuration management database (DB).
 // It starts by logging the beginning of the process and obtaining a DB connection.
@@ -308,6 +412,19 @@ func RegisterDevice(c *gin.Context) {
 	logResponseBody(res)
 	common.Log.Info(fmt.Sprintf("%s[%s] completed successfully.", c.Request.URL.Path, c.Request.Method))
 
+	ctx := context.Background()
+	client, err := DaprClientFactory()
+	if err != nil {
+		errorDatial := "publish generate error"
+		common.Log.Error(fmt.Sprintf("%s %s : %s", funcName, errorDatial, err.Error()), false)
+		c.JSON(http.StatusInternalServerError, convertErrorResponse(http.StatusInternalServerError, errorDatial))
+	}
+	if err := client.PublishEvent(ctx, "configuration_manager_hwsync", "configuration_manager.hwsync.completed", nil); err != nil {
+		errorDatial := "publish error"
+		common.Log.Error(fmt.Sprintf("%s %s : %s", funcName, errorDatial, err.Error()), false)
+		c.JSON(http.StatusInternalServerError, convertErrorResponse(http.StatusInternalServerError, errorDatial))
+	}
+
 	c.JSON(http.StatusCreated, res)
 }
 
@@ -321,13 +438,15 @@ func RegisterDevice(c *gin.Context) {
 // After processing all records, it closes the cursor and returns the map of existing devices.
 // If an error occurs while processing the results, it returns an error indicating the failure to load the resource list cursor.
 func getDeviceIDList(tx *sql.Tx) (map[string]existingResource, error) {
-	common.Log.Debug(getQueryResourceList())
+	query := getQueryResourceList()
+	common.Log.Debug(fmt.Sprintf("query: %s, params: %v", query, resourceTypeList))
 	res := map[string]existingResource{}
-	cypherCursor, err := age.ExecCypher(tx, database.GRAPH_NAME, selectDeviceListColumnCount, getQueryResourceList())
+	cypherCursor, err := age.ExecCypher(tx, database.GRAPH_NAME, selectDeviceListColumnCount, query, resourceTypeList...)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	for cypherCursor.Next() {
 		row, err := cypherCursor.GetRow()
@@ -343,7 +462,6 @@ func getDeviceIDList(tx *sql.Tx) (map[string]existingResource, error) {
 		// The initial value of isNotDetected is "true: detected" (change to "false: not detected" when checking existence and it was detected)
 		res[deviceID] = existingResource{isNotDetected: true, resourceType: hwResourceType(resourceType), resourceGroupIDs: resourceGroupIDs}
 	}
-	cypherCursor.Close()
 
 	return res, nil
 }
@@ -359,13 +477,14 @@ func getDeviceIDList(tx *sql.Tx) (map[string]existingResource, error) {
 // After processing all records, the cursor is closed and the map of nodes is returned.
 // If an error occurs while processing the results, an appropriate error is returned.
 func getNodeList(tx *sql.Tx) (map[string]existingNodeSwitch, error) {
-	common.Log.Debug(cypherSelectNodeList)
+	common.Log.Debug(fmt.Sprintf("query: %s", cypherSelectNodeList))
 	res := map[string]existingNodeSwitch{}
 	cypherCursor, err := age.ExecCypher(tx, database.GRAPH_NAME, selectNodeListColumnCount, cypherSelectNodeList)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	preNodeID := ""
 	for cypherCursor.Next() {
@@ -391,7 +510,6 @@ func getNodeList(tx *sql.Tx) (map[string]existingNodeSwitch, error) {
 
 		preNodeID = nodeID
 	}
-	cypherCursor.Close()
 
 	return res, nil
 }
@@ -408,13 +526,14 @@ func getNodeList(tx *sql.Tx) (map[string]existingNodeSwitch, error) {
 // After processing all records, the cursor is closed, and the map of CXL switches is returned.
 // If an error occurs while processing the results, an appropriate error message is returned to indicate the failure.
 func getCxlSwitchList(tx *sql.Tx) (map[string]existingNodeSwitch, error) {
-	common.Log.Debug(cyperSelectSwitchList)
+	common.Log.Debug(fmt.Sprintf("query: %s", cyperSelectSwitchList))
 	res := map[string]existingNodeSwitch{}
 	cypherCursor, err := age.ExecCypher(tx, database.GRAPH_NAME, selectSwitchListColumnCount, cyperSelectSwitchList)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	preCxlSwitchID := ""
 	for cypherCursor.Next() {
@@ -450,7 +569,6 @@ func getCxlSwitchList(tx *sql.Tx) (map[string]existingNodeSwitch, error) {
 
 		preCxlSwitchID = cxlSwitchID
 	}
-	cypherCursor.Close()
 
 	return res, nil
 }
@@ -491,17 +609,33 @@ func validateRegisterData(body []map[string]any) (*resourceRegister, error) {
 	return &resourceRegister, nil
 }
 
-// registerResources compares the list of registered resources with the JSON of the RequestBody,
-// marking existing ones while performing registration and update for resources and annotation Vertexes through Merge process.
-// This function is pivotal for maintaining the integrity and up-to-dateness of the resource database.
-// It takes a transaction object, maps of existing resources, nodes, and switches, and a struct containing request resources as inputs.
-// The function iterates over each request resource, performing a series of checks and operations:
-// - Merges resource and annotation Vertexes, creating or deleting edges as necessary.
-// - Checks and updates the mapping of resources to ensure they are correctly associated with nodes and switches.
-// - Deletes device IDs from nodes or switches where they no longer belong.
-// - Synchronizes the state of resources, nodes, and switches with the database, reflecting any changes made.
-// - Physically deletes node Vertexes that are no longer connected to any edges, to prevent clutter in the database.
-// The function returns a list of successfully registered device IDs or an error if any operation fails.
+// registerResources processes and registers multiple hardware resources in the configuration management database.
+// This function orchestrates the complete registration workflow for hardware resources including CPUs, GPUs,
+// memory, storage devices, and other components, managing their relationships with nodes and CXL switches.
+//
+// The registration process involves several key phases:
+//  1. Resource Processing: For each resource in the request, merges resource and annotation vertices,
+//     establishes relationships, and manages detection states.
+//  2. Topology Management: Maps resources to their associated nodes and CXL switches, ensuring proper
+//     hardware topology representation and removing outdated associations.
+//  3. State Synchronization: Updates the detection state of existing resources and synchronizes
+//     unit-level relationships between composite devices.
+//  4. Graph Maintenance: Synchronizes node and CXL switch vertices, manages their edges, and performs
+//     cleanup operations to maintain database integrity.
+//
+// Parameters:
+//   - tx: Database transaction for atomic operations across all registration steps
+//   - dbExistsResources: Map of existing resources indexed by device ID, used to track detection states
+//   - dbExistsNodes: Map of existing nodes and their associated devices, maintaining node topology
+//   - dbExistsSwitches: Map of existing CXL switches and their connected devices, maintaining switch topology
+//   - requestResources: Validated resource registration data containing device information to register
+//
+// Returns:
+//   - []string: List of device IDs that were successfully registered during this operation
+//   - error: Any error encountered during the registration process, causing transaction rollback
+//
+// The function ensures data consistency through transaction management and maintains the integrity
+// of the hardware topology graph by properly managing vertex and edge relationships.
 func registerResources(
 	tx *sql.Tx,
 	dbExistsResources map[string]existingResource,
@@ -526,7 +660,7 @@ func registerResources(
 		}
 
 		// Check if the obtained requestID exists in dbExistsResources
-		mappingResources(dbExistsResources, deviceID)
+		updateResourcesAsDetected(dbExistsResources, deviceID, resourceType)
 
 		// Check if the node mentioned in links exists in dbExistsNodes
 		nodeID := mappingNodes(requestResource, dbExistsNodes)
@@ -551,6 +685,13 @@ func registerResources(
 		}
 	}
 
+	for _, requestResource := range requestResources.resource {
+		err := mergeUnit(tx, requestResource, dbExistsResources)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Merge and logically delete node Vertex based on the information in dbExistsNodes
 	for nodeID, existingNode := range dbExistsNodes {
 		// Reflect the node's Vertex and Edge in the DB
@@ -562,7 +703,7 @@ func registerResources(
 
 	// Physically delete the node Vertex (Target for deletion: Nodes that do not have any Compose Edge connected)
 	// Reason for physical deletion: Since nodes without any linked resources will not be reused, physical deletion is performed to prevent unnecessary nodes from remaining.
-	common.Log.Debug(cypherDeleteNodeWithoutEdges)
+	common.Log.Debug(fmt.Sprintf("query: %s", cypherDeleteNodeWithoutEdges))
 	_, err := age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteNodeWithoutEdges)
 	if err != nil {
 		common.Log.Error(err.Error())
@@ -582,23 +723,28 @@ func registerResources(
 	return registerIdList, nil
 }
 
-// mappingResources updates the detection status of a device in the existing resources map.
-// This function checks if a device, identified by its deviceID, exists in the map of existing resources.
-// If the device is found, it updates the device's detection status to indicate that the device is not "not detected" (i.e., it has been detected).
-// This is crucial for maintaining the accuracy of the resource tracking system, ensuring that devices are correctly marked as detected when they are present in the request.
+// updateResourcesAsDetected updates the dbExistsResources map for a given deviceID and resourceType.
+// If the deviceID already exists in the map, it sets the isNotDetected field to false,
+// indicating the resource has been detected. If the deviceID does not exist, it creates
+// a new entry with isNotDetected set to false and assigns the provided resourceType.
 //
 // Parameters:
-// - dbExistsResources: A map of existing resources where the key is the deviceID and the value is the existingResource struct.
-// - deviceID: The unique identifier of the device being checked.
-//
-// The function does not return any value. It directly modifies the dbExistsResources map by updating the detection status of the specified device.
-func mappingResources(dbExistsResources map[string]existingResource, deviceID string) {
+//   - dbExistsResources: map of device IDs to existingResource structs, representing current resources.
+//   - deviceID: the unique identifier for the device/resource to update or add.
+//   - resourceType: the type of hardware resource associated with the deviceID.
+func updateResourcesAsDetected(dbExistsResources map[string]existingResource, deviceID string, resourceType hwResourceType) {
 	// If it exists, change isNotDetected in dbExistsResources to false: not detected
-	existResData, deviceIDOk := dbExistsResources[deviceID]
-	if deviceIDOk {
+	existResData, ok := dbExistsResources[deviceID]
+	if ok {
 		// Exists
 		existResData.isNotDetected = false
 		dbExistsResources[deviceID] = existResData
+	} else {
+		// Does not exist, create a new entry
+		dbExistsResources[deviceID] = existingResource{
+			isNotDetected: false,
+			resourceType:  resourceType,
+		}
 	}
 }
 
@@ -769,18 +915,16 @@ func syncNotDetectedResource(tx *sql.Tx, deviceID string, dbExistingResource exi
 			return err
 		}
 		// If the resource Vertex in the check result list and the NotDetectedDevice Vertex are already connected by an Edge, delete that Edge once
-		cypherNotDetectedEdgeDelete := fmt.Sprintf(cypherDeleteResourceNotdetectedEdge, label, deviceID)
-		common.Log.Debug(cypherNotDetectedEdgeDelete)
-		_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherNotDetectedEdgeDelete)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherDeleteResourceNotdetectedEdge, label, deviceID))
+		_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteResourceNotdetectedEdge, label, deviceID)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
 		}
 
 		// Connect the resource Vertex in the check result list and the NotDetectedDevice Vertex with an Edge
-		cypherNotDetectedEdgeCreate := fmt.Sprintf(cypherCreateResourceNotdetectedEdge, label, deviceID)
-		common.Log.Debug(cypherNotDetectedEdgeCreate)
-		_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherNotDetectedEdgeCreate)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherCreateResourceNotdetectedEdge, label, deviceID))
+		_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherCreateResourceNotdetectedEdge, label, deviceID)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
@@ -809,27 +953,24 @@ func syncNotDetectedResource(tx *sql.Tx, deviceID string, dbExistingResource exi
 // This function is crucial for maintaining the integrity and accuracy of the network topology represented in the database.
 func syncNode(tx *sql.Tx, nodeID string, existingNode existingNodeSwitch) error {
 	// Delete the NotDetected Edge that connects the Node Vertex and the NotDetectedDevice Vertex
-	cypherNodeNotDetectedEdgeDelete := fmt.Sprintf(cypherDeleteNodeNotdetectedEdge, nodeID)
-	common.Log.Debug(cypherNodeNotDetectedEdgeDelete)
-	_, err := age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherNodeNotDetectedEdgeDelete)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", cypherDeleteNodeNotdetectedEdge, nodeID))
+	_, err := age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteNodeNotdetectedEdge, nodeID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
 	}
 
 	// Merge the Node Vertex
-	cypherNodeCreate := fmt.Sprintf(cypherMergeNode, nodeID, nodeID)
-	common.Log.Debug(cypherNodeCreate)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherNodeCreate)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherMergeNode, nodeID, nodeID))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherMergeNode, nodeID, nodeID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
 	}
 
 	// Delete the Compose Edge associated with the Node Vertex
-	cypherComposeDelete := fmt.Sprintf(cypherDeleteComposeEdge, nodeID)
-	common.Log.Debug(cypherComposeDelete)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherComposeDelete)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", cypherDeleteComposeEdge, nodeID))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteComposeEdge, nodeID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
@@ -841,9 +982,8 @@ func syncNode(tx *sql.Tx, nodeID string, existingNode existingNodeSwitch) error 
 		if err != nil {
 			return err
 		}
-		cypherComposeEdgeCreate := fmt.Sprintf(cypherCreateComposeEdge, label, deviceID, nodeID)
-		common.Log.Debug(cypherComposeEdgeCreate)
-		_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherComposeEdgeCreate)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", cypherCreateComposeEdge, label, deviceID, nodeID))
+		_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateComposeEdge, label, deviceID, nodeID)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
@@ -874,18 +1014,16 @@ func syncNode(tx *sql.Tx, nodeID string, existingNode existingNodeSwitch) error 
 // Reflect the Switch's Vertex and Edge in the DB
 func syncSwitch(tx *sql.Tx, switchID string, existingSwitch existingNodeSwitch) error {
 	// Delete the NotDetected Edge that connects the Switch Vertex and the NotDetectedDevice Vertex
-	cypherSwitchNotDetectedEdgeDelete := fmt.Sprintf(cypherDeleteSwitchNotdetectedEdge, switchID)
-	common.Log.Debug(cypherSwitchNotDetectedEdgeDelete)
-	_, err := age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherSwitchNotDetectedEdgeDelete)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", cypherDeleteSwitchNotdetectedEdge, switchID))
+	_, err := age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteSwitchNotdetectedEdge, switchID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
 	}
 
 	// Merge the Switch Vertex
-	cypherSwitchCreate := fmt.Sprintf(cypherMergeSwitch, switchID, switchID)
-	common.Log.Debug(cypherSwitchCreate)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherSwitchCreate)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherMergeSwitch, switchID, switchID))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherMergeSwitch, switchID, switchID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
@@ -893,9 +1031,8 @@ func syncSwitch(tx *sql.Tx, switchID string, existingSwitch existingNodeSwitch) 
 
 	// Delete all Connect Edges associated with the Switch Vertex
 	// After deletion, reattach all necessary Edges
-	cypherConnectDelete := fmt.Sprintf(cypherDeleteConnectEdge, switchID)
-	common.Log.Debug(cypherConnectDelete)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherConnectDelete)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", cypherDeleteConnectEdge, switchID))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteConnectEdge, switchID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
@@ -907,9 +1044,8 @@ func syncSwitch(tx *sql.Tx, switchID string, existingSwitch existingNodeSwitch) 
 		if err != nil {
 			return err
 		}
-		cypherConnectEdgeCreate := fmt.Sprintf(cypherCreateConnectEdge, label, deviceID, switchID)
-		common.Log.Debug(cypherConnectEdgeCreate)
-		_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherConnectEdgeCreate)
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", cypherCreateConnectEdge, label, deviceID, switchID))
+		_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateConnectEdge, label, deviceID, switchID)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
@@ -953,21 +1089,17 @@ func mergeResource(tx *sql.Tx, deviceID string, resourceType hwResourceType, req
 	if err != nil {
 		return err
 	}
-	cypherResourceMerge := fmt.Sprintf(cyperMergeResource, label, deviceID, property)
-	common.Log.Debug(cypherResourceMerge)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherResourceMerge)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", cyperMergeResource, label, deviceID, property))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cyperMergeResource, label, deviceID, property)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
 	}
 
-	if _, ok := dbExistsResources[deviceID]; ok {
-		// If the resource existed during the last HW sync, do not update the Annotation Vertex
-	} else {
-		// If the resource did not exist during the last HW sync, create the Annotation Vertex
-		cypherAnnotationCreate := fmt.Sprintf(cypherCreateAnnotation, label, deviceID)
-		common.Log.Debug(cypherAnnotationCreate)
-		_, err := age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherAnnotationCreate)
+	if _, ok := dbExistsResources[deviceID]; !ok {
+		// For initial registration, create the Annotation Vertex
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherCreateAnnotation, label, deviceID))
+		_, err := age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateAnnotation, label, deviceID)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
@@ -975,26 +1107,17 @@ func mergeResource(tx *sql.Tx, deviceID string, resourceType hwResourceType, req
 	}
 
 	// Delete the NotDetected Edge
-	cypherNotDetectedEdgeDelete := fmt.Sprintf(cypherDeleteResourceNotdetectedEdge, label, deviceID)
-	common.Log.Debug(cypherNotDetectedEdgeDelete)
-	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherNotDetectedEdgeDelete)
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s", cypherDeleteResourceNotdetectedEdge, label, deviceID))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, deleteColumnCount, cypherDeleteResourceNotdetectedEdge, label, deviceID)
 	if err != nil {
 		common.Log.Error(err.Error())
 		return err
 	}
 
-	label, err = resourceType.convertToDBLabel()
-	if err != nil {
-		return err
-	}
-
-	if _, ok := dbExistsResources[deviceID]; ok {
-		// If the resource existed during the last HW sync, do nothing (since it's already connected to the resource group and there are no changes)
-	} else {
-		// If the resource did not exist during the last HW sync, create a new Include Edge from "default group" to "resource"
-		cypherCreateIncludeEdge := fmt.Sprintf(cypherCreateIncludeEdge, label, deviceID, common.DefaultGroupId)
-		common.Log.Debug(cypherCreateIncludeEdge)
-		_, err := age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateIncludeEdge)
+	if _, ok := dbExistsResources[deviceID]; !ok {
+		// For initial registration, create the Include Edge with the default group
+		common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", cypherCreateIncludeEdge, label, deviceID, common.DefaultGroupId))
+		_, err := age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateIncludeEdge, label, deviceID, common.DefaultGroupId)
 		if err != nil {
 			common.Log.Error(err.Error())
 			return err
@@ -1002,4 +1125,175 @@ func mergeResource(tx *sql.Tx, deviceID string, resourceType hwResourceType, req
 	}
 
 	return nil
+}
+
+// mergeUnit merges unit resource data from a request with existing database resources.
+// It identifies non-removable device IDs from the request, creates a unit resource relation,
+// and registers the unit graph in the database if the relation is not registerable.
+//
+// Parameters:
+//   - tx: Database transaction for executing operations
+//   - requestResource: Map containing unit resource data from the request
+//   - dbExistsResources: Map of existing resources in the database indexed by string keys
+//
+// Returns:
+//   - error: Any error that occurred during the merge operation, nil if successful
+func mergeUnit(tx *sql.Tx, requestResource map[string]any, dbExistsResources map[string]existingResource) error {
+	nonRemovableDeviceIDs := getNonRemovableDeviceIds(requestResource)
+
+	unitResources := newUnitResources(requestResource, nonRemovableDeviceIDs)
+	if unitResources.isRegisterable() {
+		err := registerUnitGraph(tx, unitResources, dbExistsResources)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// getNonRemovableDeviceIds extracts the list of non-removable device IDs from the given requestResource map.
+// It expects the following nested structure in requestResource:
+//   - "constraints": map[string]any (optional; absence is not treated as a warning)
+//   - "constraints/nonRemovableDevices": []any (optional; absence is not treated as a warning)
+//   - "constraints/nonRemovableDevices" each element: map[string]any with a "deviceID" key (string)
+//
+// If any part of the structure is missing or invalid (except for missing "constraints" or "nonRemovableDevices"),
+// it logs a warning or debug message and returns an empty slice.
+// Returns a slice of device IDs (strings) for all valid non-removable devices found.
+func getNonRemovableDeviceIds(requestResource map[string]any) []string {
+	constraints, ok := requestResource["constraints"]
+	if !ok {
+		// [Normal] The absence of the constraints element is expected, so it is treated as normal. Output a Debug log and return an empty slice
+		common.Log.Debug(fmt.Sprintf("constraints field is missing. resource(%v)", requestResource))
+		return []string{}
+	}
+
+	constraintsMap, ok := constraints.(map[string]any)
+	if !ok {
+		// [Warning] The constraints element not being a Map is unexpected, so it is treated as a Warning. Output a Warning log and return an empty slice
+		common.Log.Warn(fmt.Sprintf("constraints field is not a map. resource(%v)", requestResource))
+		return []string{}
+	}
+
+	nonRemovableDevices, ok := constraintsMap["nonRemovableDevices"]
+	if !ok {
+		// [Normal] The absence of the nonRemovableDevices element is expected, so it is treated as normal. Output a Debug log and return an empty slice
+		common.Log.Debug(fmt.Sprintf("constraints/nonRemovableDevices field is missing. resource(%v)", requestResource))
+		return []string{}
+	}
+
+	nonRemovableDevicesSlice, ok := nonRemovableDevices.([]any)
+	if !ok {
+		// [Warning] The constraints element not being a Slice is unexpected, so it is treated as a Warning. Output a Warning log and return an empty slice
+		common.Log.Warn(fmt.Sprintf("constraints/nonRemovableDevices field is not a list. resource(%v)", requestResource))
+		return []string{}
+	}
+
+	if len(nonRemovableDevicesSlice) == 0 {
+		// [Warning] The constraints element being a Slice but having 0 elements is unexpected, so it is treated as a Warning. Output a Warning log and return an empty slice
+		common.Log.Warn(fmt.Sprintf("constraints/nonRemovableDevices contains no elements. resource(%v)", requestResource))
+		return []string{}
+	}
+
+	res := []string{}
+	for i, device := range nonRemovableDevicesSlice {
+		deviceMap, ok := device.(map[string]any)
+		if !ok {
+			// [Warning] An element under the constraints element (Slice) not being a Map is unexpected, so output a Warning log and Skip
+			common.Log.Warn(fmt.Sprintf("constraints/nonRemovableDevices[%d] field is not a map. resource(%v)", i, requestResource))
+			continue
+		}
+		deviceID, ok := deviceMap["deviceID"].(string)
+		if !ok {
+			// [Warning] The absence of "Key:deviceID" in the Map under the constraints element (Slice) is unexpected, so output a Warning log and Skip
+			common.Log.Warn(fmt.Sprintf("constraints/nonRemovableDevices[%d]/deviceID field is missing or not a string. resource(%v)", i, requestResource))
+			continue
+		}
+		res = append(res, deviceID)
+	}
+
+	return res
+}
+
+// registerUnitGraph creates or updates a unit node in the graph database and establishes
+// containment relationships with its associated resources.
+//
+// The function performs the following operations:
+// 1. Merges a unit node and deletes existing containment relationships
+// 2. Creates new containment relationships between the unit and its resources
+//
+// Parameters:
+//   - tx: Database transaction for executing graph operations
+//   - unitResources: Contains unit device ID and associated resource information
+//   - dbExistsResources: Map of existing resources in the database to avoid duplicates
+//
+// Returns:
+//   - error: nil on success, otherwise an error describing what went wrong
+//
+// The function uses Cypher queries to interact with the Apache AGE graph database
+// and logs debug information for query execution and error details.
+func registerUnitGraph(tx *sql.Tx, unitResources unitResources, dbExistsResources map[string]existingResource) error {
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s", cypherMergeUnitAndDeleteContain, unitResources.unitDeviceID))
+	_, err := age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherMergeUnitAndDeleteContain, unitResources.unitDeviceID)
+	if err != nil {
+		common.Log.Error(err.Error())
+		return err
+	}
+
+	matches, creates, err := createContainQuery(unitResources, dbExistsResources)
+	if err != nil {
+		common.Log.Error(err.Error())
+		return err
+	}
+
+	common.Log.Debug(fmt.Sprintf("query: %s, param1: %s, param2: %s, param3: %s", cypherCreateContain, unitResources.unitDeviceID, matches, creates))
+	_, err = age.ExecCypher(tx, database.GRAPH_NAME, mergeColumnCount, cypherCreateContain, unitResources.unitDeviceID, matches, creates)
+	if err != nil {
+		common.Log.Error(err.Error())
+		return err
+	}
+
+	return nil
+}
+
+// createContainQuery constructs Cypher query parts for creating "contain" relationships
+// between a unit and its related devices in a Neo4j database.
+//
+// It takes a unitResources containing device IDs and a map of existing database resources,
+// then generates MATCH and CREATE clauses for each valid related device.
+//
+// Parameters:
+//   - unitResources: contains the list of related device IDs to process
+//   - dbExistsResources: map of device ID to existing resource information
+//
+// Returns:
+//   - string: comma-separated MATCH clauses for Cypher query
+//   - string: comma-separated CREATE clauses for Cypher query
+//   - error: any error encountered during label conversion
+//
+// The function skips devices that don't exist in dbExistsResources and logs warnings.
+// If a resource type cannot be converted to a database label, an error is returned.
+func createContainQuery(unitResources unitResources, dbExistsResources map[string]existingResource) (string, string, error) {
+	matches := make([]string, 0, len(unitResources.resourceDeviceIDs))
+	creates := make([]string, 0, len(unitResources.resourceDeviceIDs))
+
+	for i, relatedDeviceID := range unitResources.resourceDeviceIDs {
+		resource, ok := dbExistsResources[relatedDeviceID]
+		if !ok {
+			// This condition should not be reached unless the "nonRemovableDevices" in the resource received from HWControl contains an invalid deviceID
+			common.Log.Warn(fmt.Sprintf("Resource with deviceID %s does not exist in dbExistsResources", relatedDeviceID))
+			continue
+		}
+
+		label, err := resource.resourceType.convertToDBLabel()
+		if err != nil {
+			// This error should not occur because invalid resource types are already checked when registering resources in this API
+			return "", "", err
+		}
+		matches = append(matches, fmt.Sprintf(cypherCreateContainMatchParts, i, label, relatedDeviceID))
+		creates = append(creates, fmt.Sprintf(cypherCreateContainCreateParts, i))
+	}
+
+	return strings.Join(matches, ", "), strings.Join(creates, ", "), nil
 }

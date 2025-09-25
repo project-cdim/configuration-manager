@@ -1,17 +1,17 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package main
 
 import (
@@ -33,11 +33,11 @@ const urlBaseV1 = "/" + common.ProjectName + "/api/v1"
 var log, _ = logger.New(logger_common.Option{Tag: logger_common.TAG_TRAIL})
 
 func main() {
-	engine := setupEngine()
+	engine := SetupEngine()
 	engine.Run(":8080")
 }
 
-// setupEngine initializes and returns a new instance of the gin Engine. This function configures
+// SetupEngine initializes and returns a new instance of the gin Engine. This function configures
 // the engine with essential middleware, including a custom logging middleware for audit trails,
 // and CORS support using the default configuration. It also sets up a versioned API route group
 // (v1) and defines routes for various operations such as retrieving resource lists, individual
@@ -47,7 +47,7 @@ func main() {
 //
 // Returns:
 // - A pointer to the configured gin Engine instance, ready to handle incoming HTTP requests.
-func setupEngine() *gin.Engine {
+func SetupEngine() *gin.Engine {
 	// Create an instance of the gin Engine
 	engine := gin.Default()
 

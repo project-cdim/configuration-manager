@@ -1,20 +1,21 @@
 // Copyright (C) 2025 NEC Corporation.
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 // WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 // License for the specific language governing permissions and limitations
 // under the License.
-        
+
 package group_repository
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/project-cdim/configuration-manager/common"
@@ -28,16 +29,16 @@ import (
 )
 
 const getGroupList string = `
-MATCH (vrsg: ResourceGroups)
-OPTIONAL MATCH (vrsg)-[ein: Include]->(vrs)
-OPTIONAL MATCH (vrs)-[ehv: Have]->(van)
-OPTIONAL MATCH (vrs)-[endt: NotDetected]->(vndd: NotDetectedDevice)
-OPTIONAL MATCH (vnd)-[ecm: Compose]->(vrs)
-RETURN 
-	vrsg, 
-	CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END, 
-	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END, 
-	COLLECT(vrsg.id), 
+MATCH (vrsg:ResourceGroups)
+OPTIONAL MATCH (vrsg)-[:Include]->(vrs)
+OPTIONAL MATCH (vrs)-[:Have]->(van)
+OPTIONAL MATCH (vrs)-[endt:NotDetected]->(:NotDetectedDevice)
+OPTIONAL MATCH (vnd)-[:Compose]->(vrs)
+RETURN
+	vrsg,
+	CASE WHEN vrs IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE vrs END,
+	CASE WHEN van IS NULL THEN {id:-1, label:"dummy", properties: {}}::vertex ELSE van END,
+	COLLECT(vrsg.id),
 	COLLECT(vnd.id),
 	CASE WHEN endt IS NULL THEN true ELSE false END`
 
@@ -93,11 +94,12 @@ func NewGroupListRepository(withResources bool) GroupListRepository {
 //  5. Applies the provided filter to the groups.
 //  6. Returns the filtered groups, optionally including resources based on the repository configuration.
 func (glr *GroupListRepository) FindList(cmdb database.CmDb, filter filter.CmFilter) ([]map[string]any, error) {
-	common.Log.Debug(getGroupList)
+	common.Log.Debug(fmt.Sprintf("query: %s", getGroupList))
 	cypherCursor, err := cmdb.CmDbExecCypher(getGroupListColumnCount, getGroupList)
 	if err != nil {
 		return nil, err
 	}
+	defer cypherCursor.Close()
 
 	records := [][]age.Entity{}
 	for cypherCursor.Next() {
@@ -108,7 +110,6 @@ func (glr *GroupListRepository) FindList(cmdb database.CmDb, filter filter.CmFil
 		}
 		records = append(records, row)
 	}
-	cypherCursor.Close()
 
 	sort.Slice(records, func(i, j int) bool {
 		return compareByGroupList(records, i, j)
